@@ -75,3 +75,4 @@ npm run build
 | Old Spanish | `Módulo: Contabilidad  Problema: Error de conciliación  Ticket: Sí` |
 | Old English | `Module: Accounting  Problem: Reconciliation error  Ticket: Yes` |
 | Free text | Anything else → goes to `_unstructured.csv` |
+# support-analyzer
