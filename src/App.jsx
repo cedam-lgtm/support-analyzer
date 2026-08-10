@@ -52,7 +52,7 @@ function normAppField(val) {
 // Canonical app alias map — normalises variants to a standard English name.
 // Applied before fuzzy clustering so Conta / Contabilidad / Accounting all merge.
 const APP_ALIASES = [
-  { canonical: "Accounting",    variants: /^(conta(bilidad|bilitat|b)?|contab|accounting|accountant|cuentas?|finanzas?)$/i },
+  { canonical: "Accounting",    variants: /^(conta(bilidad|bilitat|b)?|contab|accounting|accountant|cuentas?|finanzas?|financ(e|ial)?)$/i },
   { canonical: "Invoicing",     variants: /^(invoic(ing|es?)?|facturaci[oó]n|facturas?)$/i },
   { canonical: "Inventory",     variants: /^(inventor(y|io)|inventario|almac[eé]n|warehouse|stock)$/i },
   { canonical: "Sales",         variants: /^(sales?|ventas?|crm|pedidos?)$/i },
@@ -62,6 +62,21 @@ const APP_ALIASES = [
   { canonical: "HR",            variants: /^(hr|human\s+resources?|recursos\s+humanos?|empleados?)$/i },
   { canonical: "Website",       variants: /^(web(site)?|sitio\s+web|ecommerce|e-commerce|tienda)$/i },
   { canonical: "Helpdesk",      variants: /^(helpdesk|help\s+desk|soporte|tickets?)$/i },
+  // Added after comparing against a real Odoo Live Chat export — these appeared
+  // frequently as raw app values but had no canonical entry, so they were only
+  // being merged by fuzzy clustering instead of deterministically.
+  { canonical: "Admin",         variants: /^(admin|administraci[oó]n|administrator(s)?|administrative)$/i },
+  { canonical: "POS",           variants: /^(pos|point\s+of\s+sale|tpv|punto\s+de\s+venta)$/i },
+  { canonical: "Subscription",  variants: /^(subscriptions?|suscripci[oó]n(es)?)$/i },
+  { canonical: "Sign",          variants: /^(sign|e-?sign|firma(s)?|firma\s+electr[oó]nica)$/i },
+  { canonical: "Studio",        variants: /^studio$/i },
+  { canonical: "Knowledge",     variants: /^(knowledge|conocimiento)$/i },
+  { canonical: "Appointments",  variants: /^(appointments?|citas?)$/i },
+  { canonical: "Marketing",     variants: /^(mail(ing)?|marketing|email\s+marketing|newsletter|correos?)$/i },
+  { canonical: "Bank Sync",     variants: /^(bank\s*sync(hronization)?|sincronizaci[oó]n\s+bancaria|conciliaci[oó]n\s+bancaria)$/i },
+  { canonical: "Product Flow",  variants: /^(product\s*flow|flujo\s+de\s+producto)$/i },
+  { canonical: "Presales",      variants: /^(pre-?sales|preventas?|pre-?venta)$/i },
+  { canonical: "API",           variants: /^(api|integraci[oó]n(es)?|integrations?|webhooks?|rpc)$/i },
 ];
 function canonicalApp(raw) {
   if (!raw) return raw;
@@ -72,15 +87,45 @@ function canonicalApp(raw) {
   return t;
 }
 
+// Every field label the parser recognizes, across all note formats/dialects.
+// Used as a shared "stop here" boundary in every capture in parseNote below.
+// Without a SHARED boundary, a capture whose own expected next label doesn't
+// appear (e.g. a note using bare "Ticket:" where "ticket_needed:" was
+// expected, or one using "Action taken:" which no single format anticipates)
+// swallows all remaining text — including the next field's label itself.
+// stripHtml turns "<br>" into a space rather than a newline, so within a
+// single note there are no real line breaks left to bound matches naturally.
+const FIELD_LABEL = "(?:apps?|issues?|ticket[_\\s]needed|ticket|m[oó]dulo|problema|module|problem|action\\s*taken|resolved|se\\s*solucion[oó])\\s*[:：]";
+const fieldBoundary = `(?=\\s*${FIELD_LABEL}|$)`;
+
 function parseNote(raw, meta) {
   if (!raw || !raw.trim()) return null;
   const text = stripHtml(raw);
 
+  // Hybrid: some agents mix "module:"/"módulo:" (the app label from the old
+  // ES/EN formats) with "issue:" (the new-format label) instead of
+  // "problem:"/"problema:" — found in a real Odoo Live Chat export. Must run
+  // BEFORE the "new" format check below: that check's issue-only fallback
+  // would otherwise match on "issue:" alone and silently drop the module
+  // value entirely, since it has no "app:"/"apps:" label to look for.
+  // Gated on problema/problem being ABSENT so well-formed old_es/old_en notes
+  // are left untouched and handled by their own checks further down.
+  const hasProblemLabel = /\bproblema\s*[:：]|\bproblem\s*[:：]/i.test(text);
+  const hybridMod   = text.match(new RegExp(`\\b(?:m[oó]dulo|module)\\s*[:：]\\s*([^\\n|]*?)${fieldBoundary}`, "i"));
+  const hybridIssue = !hasProblemLabel
+    ? text.match(new RegExp(`\\bissues?\\s*[:：]\\s*([^\\n|]*?)${fieldBoundary}`, "i"))
+    : null;
+  const hybridTkt    = text.match(/\bticket(?:[_\s]needed)?\s*[:：]\s*([^\n|]*)/i);
+  const hybridModVal   = normAppField(hybridMod?.[1]);
+  const hybridIssueVal = normField(hybridIssue?.[1]);
+  if (hybridMod && hybridIssue && (hybridModVal || hybridIssueVal))
+    return { format:"hybrid", app:hybridModVal, issue:hybridIssueVal, ticket_needed:normTicket(hybridTkt?.[1]), raw_note:text, ...meta };
+
   // New format: app/apps + issue/issues + ticket_needed
   // apps? and issues? accept both singular and plural variants
   // \b word boundaries stop "UnablePrintTicket" from matching
-  const appM   = text.match(/\bapps?\s*[:：]\s*([^\n|]*?)(?=\s*\bissues?\s*[:：]|$)/i);
-  const issueM = text.match(/\bissues?\s*[:：]\s*([^\n|]*?)(?=\s*\bticket[_\s]needed\s*[:：]|$)/i);
+  const appM   = text.match(new RegExp(`\\bapps?\\s*[:：]\\s*([^\\n|]*?)${fieldBoundary}`, "i"));
+  const issueM = text.match(new RegExp(`\\bissues?\\s*[:：]\\s*([^\\n|]*?)${fieldBoundary}`, "i"));
   const tktM   = text.match(/\bticket[_\s]needed\s*[:：]\s*([^\n|]*)/i);
   const appVal   = normAppField(appM?.[1]);
   const issueVal = normField(issueM?.[1]);
@@ -88,8 +133,8 @@ function parseNote(raw, meta) {
     return { format:"new", app:appVal, issue:issueVal, ticket_needed:normTicket(tktM?.[1]), raw_note:text, ...meta };
 
   // Old Spanish: Módulo / Problema / Ticket
-  const modM  = text.match(/\b[Mm][oó]dulo\s*[:：]\s*([^\n]*?)(?=\s*\b[Pp]roblema\s*[:：]|$)/i);
-  const probM = text.match(/\b[Pp]roblema\s*[:：]\s*([^\n]*?)(?=\s*\b[Tt]icket\s*[:：]|$)/i);
+  const modM  = text.match(new RegExp(`\\b[Mm][oó]dulo\\s*[:：]\\s*([^\\n]*?)${fieldBoundary}`, "i"));
+  const probM = text.match(new RegExp(`\\b[Pp]roblema\\s*[:：]\\s*([^\\n]*?)${fieldBoundary}`, "i"));
   const tktSp = text.match(/\b[Tt]icket\s*[:：]\s*([^\n]*)/i);
   const modVal  = normAppField(modM?.[1]);
   const probVal = normField(probM?.[1]);
@@ -97,8 +142,8 @@ function parseNote(raw, meta) {
     return { format:"old_es", app:modVal, issue:probVal, ticket_needed:normTicket(tktSp?.[1]), raw_note:text, ...meta };
 
   // Old English: Module / Problem / Ticket
-  const modEn  = text.match(/\b[Mm]odule\s*[:：]\s*([^\n]*?)(?=\s*\b[Pp]roblem\s*[:：]|$)/i);
-  const probEn = text.match(/\b[Pp]roblem\s*[:：]\s*([^\n]*?)(?=\s*\b[Tt]icket\s*[:：]|$)/i);
+  const modEn  = text.match(new RegExp(`\\b[Mm]odule\\s*[:：]\\s*([^\\n]*?)${fieldBoundary}`, "i"));
+  const probEn = text.match(new RegExp(`\\b[Pp]roblem\\s*[:：]\\s*([^\\n]*?)${fieldBoundary}`, "i"));
   const tktEn  = text.match(/\b[Tt]icket\s*[:：]\s*([^\n]*)/i);
   const modEnVal  = normAppField(modEn?.[1]);
   const probEnVal = normField(probEn?.[1]);
@@ -327,6 +372,7 @@ const FMT = {
   new:          { label:"new format", bg:"#E6F1FB", color:"#185FA5" },
   old_es:       { label:"old ES",     bg:"#EAF3DE", color:"#3B6D11" },
   old_en:       { label:"old EN",     bg:"#FAEEDA", color:"#854F0B" },
+  hybrid:       { label:"hybrid",     bg:"#F3E8FA", color:"#7A3B99" },
   unstructured: { label:"free text",  bg:"#F1EFE8", color:"#5F5E5A" },
 };
 
